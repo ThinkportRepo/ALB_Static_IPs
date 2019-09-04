@@ -1,0 +1,206 @@
+---
+Transform: AWS::Serverless-2016-10-31
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Template of Register Application Load Balancer as IP target for Network
+  Load Balancer
+
+Parameters:
+  EIP1Allocation1:
+    Type: String
+    Description: Elastic IP Allocation id for NLB
+  Subnet1:
+    Type: String
+    Description: Subnet for EIP for NLB
+  VPCID:
+    Type: String
+    Description: VPC ID for NLB
+  InternalALBDNSName:
+    Type: String
+    Default: ''
+    Description: Enter the DNS name of your internal Application Load Balancer name.
+      e.g.application-load-balancer.elb.us-east-1.amazonaws.com
+  S3BucketName:
+    Type: String
+    Default: ''
+    Description: Enter the S3 Bucket name that you want to store Application Load
+      Balancer's node IP addresses
+  ALBListenerPort:
+    Type: String
+    Default: '80'
+    Description: Enter the traffic listener port of your internal Application Load
+      Balancer
+  MAXDNSLookupPerInvocation:
+    Type: Number
+    Default: 50
+    Description: Please specify the max DNS lookup this function can perform per invocation
+  InvocationBeforeDeregistration:
+    Type: Number
+    Default: 3
+    Description: Please specify how many invocations are needed before a IP is deregistered
+  CWMetricFlagIPCount:
+    Type: String
+    Default: 'True'
+    AllowedValues:
+    - 'True'
+    - 'False'
+    Description: Please specify if you want the Lambda function to create a CloudWatch
+      metric to track IP count of your internal Application Load Balancer
+  LambdaBucket:
+    Type: String
+    Default: exampleloadbalancer-eu-central-1
+  LambdaKey:
+    Type: String
+    Default: blog-posts/static-ip-for-application-load-balancer/populate_NLB_TG_with_ALB.zip
+
+Resources:
+
+############## LAMBDA RESOURCES ################
+
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri:
+        Bucket:
+          Ref: LambdaBucket
+        Key:
+          Ref: LambdaKey
+      Description: Register Application Load Balancer to Network Load Balancer
+      Handler: populate_NLB_TG_with_ALB.lambda_handler
+      Timeout: 300
+      Role:
+        Fn::GetAtt:
+        - LambdaIAMRole
+        - Arn
+      Runtime: python2.7
+      Environment:
+        Variables:
+          ALB_DNS_NAME:
+            Ref: InternalALBDNSName
+          NLB_TG_ARN:
+            Ref: NLBTargetGroup
+          S3_BUCKET:
+            Ref: S3BucketName
+          MAX_LOOKUP_PER_INVOCATION:
+            Ref: MAXDNSLookupPerInvocation
+          INVOCATIONS_BEFORE_DEREGISTRATION:
+            Ref: InvocationBeforeDeregistration
+          CW_METRIC_FLAG_IP_COUNT:
+            Ref: CWMetricFlagIPCount
+          ALB_LISTENER:
+            Ref: ALBListenerPort
+
+
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: ScheduledRule
+      ScheduleExpression: rate(1 minute)
+      State: ENABLED
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - LambdaFunction
+          - Arn
+        Id: TargetFunctionV1
+    DependsOn:
+    - LambdaFunction
+
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+        - LambdaFunction
+        - Arn
+      Principal: events.amazonaws.com
+      Action: lambda:InvokeFunction
+      SourceArn:
+        Fn::GetAtt:
+        - ScheduledRule
+        - Arn
+  LambdaIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: Lambda-ALBasTarget
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: LambdaLogging
+            Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+            - arn:aws:logs:*:*:*
+          - Sid: S3
+            Action:
+            - s3:Get*
+            - s3:PutObject
+            - s3:CreateBucket
+            - s3:ListBucket
+            - s3:ListAllMyBuckets
+            Effect: Allow
+            Resource: "*"
+          - Sid: ELB
+            Action:
+            - elasticloadbalancing:Describe*
+            - elasticloadbalancing:RegisterTargets
+            - elasticloadbalancing:DeregisterTargets
+            Effect: Allow
+            Resource: "*"
+          - Sid: CW
+            Action:
+            - cloudwatch:putMetricData
+            Effect: Allow
+            Resource: "*"
+
+
+############## LOAD BALANCER RESOURCES ################
+
+
+  NLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      SubnetMappings:
+      - AllocationId: 
+          Ref: EIP1Allocation1
+        SubnetId:
+          Ref: Subnet1
+      Type: network
+      IpAddressType: ipv4
+
+  NLBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      Name: NLBTargets
+      Port: 80
+      Protocol: TCP
+      # TargetGroupAttributes:
+      # - Key: deregistration_delay.timeout_seconds
+      #   Value: '20'
+      VpcId:
+        Ref: VPCID
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: NLBTargetGroup
+      LoadBalancerArn:
+        Ref: NLB
+      Port: 80
+      Protocol: TCP
